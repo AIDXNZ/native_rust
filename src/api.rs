@@ -63,33 +63,65 @@ pub struct Request {
     addrs: Vec<String>,
 }
 
+use std::{
+    fmt::Error,
+    net::TcpListener,
+    thread::{self, spawn},
+};
 
-use std::{fmt::Error, thread::{self, spawn}, net::TcpListener};
-
-use flutter_rust_bridge::{StreamSink, support::lazy_static};
-use futures::{executor::block_on, select, StreamExt};
-use libp2p::{core::{transport::Boxed, upgrade::Version, muxing::StreamMuxerBox}, identity, PeerId, yamux::YamuxConfig, noise, tcp::async_io, Transport, Swarm, identify, swarm::{SwarmEvent, handler, keep_alive, NetworkBehaviour}, Multiaddr};
-use serde::{Serialize, Deserialize};
-use tungstenite::{accept, Message};
-use serde_json::{Result, Value};
 use cbor::{Decoder, Encoder};
+use flutter_rust_bridge::{support::lazy_static, StreamSink};
+use futures::{executor::block_on, select, StreamExt};
+use libp2p::{
+    core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
+    identify, identity, noise,
+    swarm::{handler, keep_alive, NetworkBehaviour, SwarmEvent},
+    tcp::async_io,
+    yamux::YamuxConfig,
+    Multiaddr, PeerId, Swarm, Transport, mdns::{self, MdnsEvent},
+};
 use rustc_serialize::json::{Json, ToJson};
+use serde::{Deserialize, Serialize};
+use serde_json::{Result, Value};
+use tungstenite::{accept, Message};
 
-fn build_transport(
-    key_pair: identity::Keypair,
-    
-) -> Boxed<(PeerId, StreamMuxerBox)>{
+fn build_transport(key_pair: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let base_transport = async_io::Transport::new(libp2p_tcp::Config::default().nodelay(true));
     let noise_config = noise::NoiseAuthenticated::xx(&key_pair).unwrap();
     let yamux_config = YamuxConfig::default();
 
     base_transport
-    .upgrade(Version::V1)
-    .authenticate(noise_config)
-    .multiplex(yamux_config)
-    .boxed()
+        .upgrade(Version::V1)
+        .authenticate(noise_config)
+        .multiplex(yamux_config)
+        .boxed()
 }
 
+#[derive(NetworkBehaviour)]
+#[behaviour(out_event = "Event")]
+struct ComposedBehaviour {
+    identify: identify::Behaviour,
+    mdns: mdns::async_io::Behaviour,
+    
+}
+
+#[derive(Debug)]
+enum Event {
+    Mdns(mdns::Event),
+    Identify(identify::Event),
+}
+
+impl From<mdns::Event> for Event {
+    fn from(event: mdns::Event) -> Self {
+        Event::Mdns(event)
+    }
+}
+
+impl From<identify::Event> for Event {
+    fn from(event: identify::Event) -> Self {
+        Event::Identify(event)
+    }
+}
 
 pub fn start() {
     let handler = thread::spawn(|| {
@@ -99,48 +131,69 @@ pub fn start() {
 }
 
 async fn async_start() {
-
-    let mut local_key = identity::Keypair::generate_ed25519();
+    let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.clone().public());
     let transport = build_transport(local_key.clone());
 
     let mut swarm = {
         Swarm::with_threadpool_executor(
             transport,
-            identify::Behaviour::new(identify::Config::new("/ipfs/id/1.0.0".to_string(), local_key.clone().public())),
-            local_peer_id
+            ComposedBehaviour{
+               identify: identify::Behaviour::new(identify::Config::new(
+                    "/ipfs/id/1.0.0".to_string(),
+                    local_key.clone().public(),
+                )),
+                mdns: mdns::async_io::Behaviour::new(mdns::Config::default()).unwrap()
+            },
+            local_peer_id,
         )
     };
     let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap());
 
-
+    // This is the Rust RPC server
     let server = TcpListener::bind("127.0.0.1:9001").unwrap();
-    
+
     loop {
-        if let Some(stream) =  server.incoming().next() {
-                let mut websocket = accept(stream.unwrap()).unwrap();
-                loop {
-                    match websocket.read_message().unwrap() {
-                        msg @ Message::Text(_) | msg @ Message::Binary(_) => {
-                            let mut decoder = Decoder::from_bytes(msg.into_data());
-                            let cbor = decoder.items().next().unwrap().unwrap();
-                            let p: Value = serde_json::from_str(cbor.to_json().to_string().as_str()).unwrap();
-                            
+        if let Some(stream) = server.incoming().next() {
+            let mut websocket = accept(stream.unwrap()).unwrap();
+            loop {
+                match websocket.read_message().unwrap() {
+                    msg @ Message::Text(_) | msg @ Message::Binary(_) => {
+                        // Everything sent through RPC is in Cbor format
+                        // for the sake of ease its then converted to json to diff
+                        let mut decoder = Decoder::from_bytes(msg.into_data());
+                        let cbor = decoder.items().next().unwrap().unwrap();
+                        let p: Value =
+                            serde_json::from_str(cbor.to_json().to_string().as_str()).unwrap();
+
                             if p["local_peer_id"].as_bool().is_some() {
                                 let pid = local_peer_id.clone();
-                                websocket.write_message(tungstenite::Message::Text(pid.to_string())).unwrap();
+                                websocket
+                                    .write_message(tungstenite::Message::Text(pid.to_string()))
+                                    .unwrap();
                             } else if p["dial_addrs"].as_array().is_some() {
                                 let addrs = p["dial_addrs"].as_array().unwrap();
                                 for addr in addrs.into_iter() {
                                     let multi_addr: Multiaddr = addr.as_str().unwrap().parse().unwrap();
                                     swarm.dial(multi_addr).unwrap();
                                 }
+                            } else if p["listeners"].as_bool().is_some() {
+                                let mut addrs = vec![];
+                                for s in swarm.listeners() {
+                                    addrs.push(s.to_string());
+                                }
+                                let mut e = Encoder::from_memory();
+                                e.encode(&addrs).unwrap();
+                                websocket
+                                    .write_message(tungstenite::Message::Binary(e.as_bytes().to_vec()))
+                                    .unwrap();
                             }
-                            
-                        }
-                        Message::Ping(_) | Message::Pong(_) | Message::Close(_) | Message::Frame(_) => {}
+                    }
+                    // Ignore All other Events
+                    Message::Ping(_) | Message::Pong(_) | Message::Close(_) | Message::Frame(_) => {
                     }
                 }
+            }
         }
         select! {
             event = swarm.select_next_some() => {
@@ -158,7 +211,7 @@ async fn async_start() {
                     _ => (),
                 }
             }
-            
+
         }
     }
 }
@@ -167,4 +220,5 @@ pub fn is_valid_multiaddr(s: String) -> bool {
     let is_ok = s.parse::<Multiaddr>().is_ok();
     return is_ok;
 }
+
 
