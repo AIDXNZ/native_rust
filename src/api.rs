@@ -86,8 +86,8 @@ use libp2p::{
 use rustc_serialize::json::{Json, ToJson};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tungstenite::{accept, Message};
 use std::sync::mpsc;
+use tungstenite::{accept, Message};
 
 fn build_transport(key_pair: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let base_transport = async_io::Transport::new(libp2p_tcp::Config::default().nodelay(true));
@@ -126,7 +126,6 @@ impl From<identify::Event> for Event {
     }
 }
 
-
 pub fn start() {
     thread::spawn(|| {
         block_on(async_start()).expect("Couldn't start async start");
@@ -151,7 +150,7 @@ async fn async_start() -> Result<()> {
     let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?);
 
     // This is the Rust RPC server
-    let server = TcpListener::bind("127.0.0.1:9002")?;
+    let server = TcpListener::bind("0.0.0.0:9002")?;
 
     loop {
         for stream in server.incoming() {
@@ -160,22 +159,33 @@ async fn async_start() -> Result<()> {
                 let msg = websocket.read_message()?;
 
                 if msg.is_binary() || msg.is_text() {
-                    let pid = local_peer_id.clone();
-                    websocket.write_message(tungstenite::Message::Text(pid.to_string()))?;
+                    //let pid = local_peer_id.clone();
+                    //websocket.write_message(tungstenite::Message::Text(pid.to_string()))?;
                     let mut d = Decoder::from_bytes(msg.into_data());
                     let items = d.items().next().unwrap()?.to_json();
 
-                    match items["local_peer_id"].as_string() {
-                        Some(_) => {
-                            let pid = local_peer_id.clone();
-                            websocket.write_message(tungstenite::Message::Text(pid.to_string()))?;
-                            websocket.close(None)?;
+                    match items["local_peer_id"].as_object() {
+                        Some(map) => {
+                            if map.contains_key("local_peer_id") {
+                                let addr: Multiaddr = "/ip4/192.168.56.1/tcp/15244/p2p/12D3KooWS7at5nJ3tFequkMnWKTqnoiK3Z6x1oCvL2U8CZKL9S4Y".parse().unwrap();
+                                swarm.dial(addr).unwrap();
+                                let pid = local_peer_id.clone();
+                                websocket
+                                    .write_message(tungstenite::Message::Text(pid.to_string()))?;
+                                break;
+                            } else if map.contains_key("dial_addrs") {
+                                let addr: Multiaddr = "/ip4/192.168.56.1/tcp/15244/p2p/12D3KooWS7at5nJ3tFequkMnWKTqnoiK3Z6x1oCvL2U8CZKL9S4Y".parse().unwrap();
+                                swarm.dial(addr).unwrap();
+                                let pid = local_peer_id.clone();
+                                websocket
+                                    .write_message(tungstenite::Message::Text(pid.to_string()))?;
+                                break;
+                            }
                         }
                         None => (),
                     }
-
-                    websocket.close(None)?;
                 }
+                break;
             }
         }
         select! {
@@ -203,10 +213,6 @@ pub fn is_valid_multiaddr(s: String) -> bool {
     let is_ok = s.parse::<Multiaddr>().is_ok();
     return is_ok;
 }
-
-
-
-
 
 /////////////////////////////////////////
 /// ////////////////////////////////////
