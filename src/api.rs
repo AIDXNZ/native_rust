@@ -69,21 +69,25 @@ use std::{
     thread::{self, spawn},
 };
 
+use anyhow::Result;
 use cbor::{Decoder, Encoder};
 use flutter_rust_bridge::{support::lazy_static, StreamSink};
 use futures::{executor::block_on, select, StreamExt};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
-    identify, identity, noise,
+    identify, identity,
+    mdns::{self, MdnsEvent},
+    noise,
     swarm::{handler, keep_alive, NetworkBehaviour, SwarmEvent},
     tcp::async_io,
     yamux::YamuxConfig,
-    Multiaddr, PeerId, Swarm, Transport, mdns::{self, MdnsEvent},
+    Multiaddr, PeerId, Swarm, Transport,
 };
 use rustc_serialize::json::{Json, ToJson};
 use serde::{Deserialize, Serialize};
-use serde_json::{Result, Value};
+use serde_json::Value;
 use tungstenite::{accept, Message};
+use std::sync::mpsc;
 
 fn build_transport(key_pair: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let base_transport = async_io::Transport::new(libp2p_tcp::Config::default().nodelay(true));
@@ -102,7 +106,6 @@ fn build_transport(key_pair: identity::Keypair) -> Boxed<(PeerId, StreamMuxerBox
 struct ComposedBehaviour {
     identify: identify::Behaviour,
     mdns: mdns::async_io::Behaviour,
-    
 }
 
 #[derive(Debug)]
@@ -123,14 +126,14 @@ impl From<identify::Event> for Event {
     }
 }
 
+
 pub fn start() {
-    let handler = thread::spawn(|| {
-        block_on(async_start());
+    thread::spawn(|| {
+        block_on(async_start()).expect("Couldn't start async start");
     });
-    handler.join().unwrap();
 }
 
-async fn async_start() {
+async fn async_start() -> Result<()> {
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.clone().public());
     let transport = build_transport(local_key.clone());
@@ -138,60 +141,40 @@ async fn async_start() {
     let mut swarm = {
         Swarm::with_threadpool_executor(
             transport,
-            ComposedBehaviour{
-               identify: identify::Behaviour::new(identify::Config::new(
-                    "/ipfs/id/1.0.0".to_string(),
-                    local_key.clone().public(),
-                )),
-                mdns: mdns::async_io::Behaviour::new(mdns::Config::default()).unwrap()
-            },
+            identify::Behaviour::new(identify::Config::new(
+                "/ipfs/id/1.0.0".to_string(),
+                local_key.clone().public(),
+            )),
             local_peer_id,
         )
     };
-    let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+    let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?);
 
     // This is the Rust RPC server
-    let server = TcpListener::bind("127.0.0.1:9001").unwrap();
+    let server = TcpListener::bind("127.0.0.1:9002")?;
 
     loop {
-        if let Some(stream) = server.incoming().next() {
-            let mut websocket = accept(stream.unwrap()).unwrap();
+        for stream in server.incoming() {
+            let mut websocket = accept(stream?)?;
             loop {
-                match websocket.read_message().unwrap() {
-                    msg @ Message::Text(_) | msg @ Message::Binary(_) => {
-                        // Everything sent through RPC is in Cbor format
-                        // for the sake of ease its then converted to json to diff
-                        let mut decoder = Decoder::from_bytes(msg.into_data());
-                        let cbor = decoder.items().next().unwrap().unwrap();
-                        let p: Value =
-                            serde_json::from_str(cbor.to_json().to_string().as_str()).unwrap();
+                let msg = websocket.read_message()?;
 
-                            if p["local_peer_id"].as_bool().is_some() {
-                                let pid = local_peer_id.clone();
-                                websocket
-                                    .write_message(tungstenite::Message::Text(pid.to_string()))
-                                    .unwrap();
-                            } else if p["dial_addrs"].as_array().is_some() {
-                                let addrs = p["dial_addrs"].as_array().unwrap();
-                                for addr in addrs.into_iter() {
-                                    let multi_addr: Multiaddr = addr.as_str().unwrap().parse().unwrap();
-                                    swarm.dial(multi_addr).unwrap();
-                                }
-                            } else if p["listeners"].as_bool().is_some() {
-                                let mut addrs = vec![];
-                                for s in swarm.listeners() {
-                                    addrs.push(s.to_string());
-                                }
-                                let mut e = Encoder::from_memory();
-                                e.encode(&addrs).unwrap();
-                                websocket
-                                    .write_message(tungstenite::Message::Binary(e.as_bytes().to_vec()))
-                                    .unwrap();
-                            }
+                if msg.is_binary() || msg.is_text() {
+                    let pid = local_peer_id.clone();
+                    websocket.write_message(tungstenite::Message::Text(pid.to_string()))?;
+                    let mut d = Decoder::from_bytes(msg.into_data());
+                    let items = d.items().next().unwrap()?.to_json();
+
+                    match items["local_peer_id"].as_string() {
+                        Some(_) => {
+                            let pid = local_peer_id.clone();
+                            websocket.write_message(tungstenite::Message::Text(pid.to_string()))?;
+                            websocket.close(None)?;
+                        }
+                        None => (),
                     }
-                    // Ignore All other Events
-                    Message::Ping(_) | Message::Pong(_) | Message::Close(_) | Message::Frame(_) => {
-                    }
+
+                    websocket.close(None)?;
                 }
             }
         }
@@ -222,3 +205,25 @@ pub fn is_valid_multiaddr(s: String) -> bool {
 }
 
 
+
+
+
+/////////////////////////////////////////
+/// ////////////////////////////////////
+/// ///////////////////////////////////
+/// ///////////////////////////////////
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use futures::executor::block_on;
+
+    use super::async_start;
+
+    #[test]
+    fn it_works() {
+        block_on(async {
+            async_start().await.unwrap();
+        })
+    }
+}

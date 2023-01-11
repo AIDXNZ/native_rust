@@ -51,6 +51,19 @@ fn wire_start_impl(port_: MessagePort) {
         move || move |task_callback| Ok(start()),
     )
 }
+fn wire_is_valid_multiaddr_impl(port_: MessagePort, s: impl Wire2Api<String> + UnwindSafe) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+        WrapInfo {
+            debug_name: "is_valid_multiaddr",
+            port: Some(port_),
+            mode: FfiCallMode::Normal,
+        },
+        move || {
+            let api_s = s.wire2api();
+            move |task_callback| Ok(is_valid_multiaddr(api_s))
+        },
+    )
+}
 // Section: wrapper structs
 
 // Section: static checks
@@ -73,6 +86,13 @@ where
         (!self.is_null()).then(|| self.wire2api())
     }
 }
+
+impl Wire2Api<u8> for u8 {
+    fn wire2api(self) -> u8 {
+        self
+    }
+}
+
 // Section: impl IntoDart
 
 impl support::IntoDart for Platform {

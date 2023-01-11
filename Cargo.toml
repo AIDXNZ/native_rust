@@ -19,6 +19,7 @@ serde_json = "1.0.91"
 cbor = "0.4.1"
 rustc-serialize = "0.3.24"
 async-trait = "0.1.60"
+event-listener = "2.5.3"
 [dependencies.libp2p]
 version = "0.50.0"
 features = [
