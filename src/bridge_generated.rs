@@ -51,6 +51,29 @@ fn wire_start_impl(port_: MessagePort) {
         move || move |task_callback| Ok(start()),
     )
 }
+fn wire_event_stream_impl(port_: MessagePort) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+        WrapInfo {
+            debug_name: "event_stream",
+            port: Some(port_),
+            mode: FfiCallMode::Stream,
+        },
+        move || move |task_callback| event_stream(task_callback.stream_sink()),
+    )
+}
+fn wire_generate_cid_impl(port_: MessagePort, data: impl Wire2Api<Vec<u8>> + UnwindSafe) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap(
+        WrapInfo {
+            debug_name: "generate_cid",
+            port: Some(port_),
+            mode: FfiCallMode::Normal,
+        },
+        move || {
+            let api_data = data.wire2api();
+            move |task_callback| Ok(generate_cid(api_data))
+        },
+    )
+}
 fn wire_is_valid_multiaddr_impl(port_: MessagePort, s: impl Wire2Api<String> + UnwindSafe) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap(
         WrapInfo {

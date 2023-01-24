@@ -17,6 +17,16 @@ pub extern "C" fn wire_start(port_: i64) {
 }
 
 #[no_mangle]
+pub extern "C" fn wire_event_stream(port_: i64) {
+    wire_event_stream_impl(port_)
+}
+
+#[no_mangle]
+pub extern "C" fn wire_generate_cid(port_: i64, data: *mut wire_uint_8_list) {
+    wire_generate_cid_impl(port_, data)
+}
+
+#[no_mangle]
 pub extern "C" fn wire_is_valid_multiaddr(port_: i64, s: *mut wire_uint_8_list) {
     wire_is_valid_multiaddr_impl(port_, s)
 }
